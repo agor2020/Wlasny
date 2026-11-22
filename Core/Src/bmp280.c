@@ -50,6 +50,10 @@
 
 #define BMP280_RESET_VALUE     0xB6
 
+#define BMP280_I2C_TIMEOUT_MS      50   /* single I2C transfer */
+#define BMP280_STARTUP_DELAY_MS    3    /* start-up time after reset is 2 ms */
+#define BMP280_STARTUP_TIMEOUT_MS  100  /* max time for copying the NVM data */
+
 
 
 void bmp280_init_default_params(bmp280_params_t *params) {
@@ -66,7 +70,7 @@ static bool read_register16(BMP280_HandleTypedef *dev, uint8_t addr, uint16_t *v
 	uint8_t rx_buff[2];
 	tx_buff = (dev->addr << 1);
 
-	if (HAL_I2C_Mem_Read(dev->i2c, tx_buff, addr, 1, rx_buff, 2, 5000)
+	if (HAL_I2C_Mem_Read(dev->i2c, tx_buff, addr, 1, rx_buff, 2, BMP280_I2C_TIMEOUT_MS)
 			== HAL_OK) {
 		*value = (uint16_t) ((rx_buff[1] << 8) | rx_buff[0]);
 		return true;
@@ -79,7 +83,7 @@ static inline int read_data(BMP280_HandleTypedef *dev, uint8_t addr, uint8_t *va
 		uint8_t len) {
 	uint16_t tx_buff;
 	tx_buff = (dev->addr << 1);
-	if (HAL_I2C_Mem_Read(dev->i2c, tx_buff, addr, 1, value, len, 5000) == HAL_OK)
+	if (HAL_I2C_Mem_Read(dev->i2c, tx_buff, addr, 1, value, len, BMP280_I2C_TIMEOUT_MS) == HAL_OK)
 		return 0;
 	else
 		return 1;
@@ -117,8 +121,9 @@ static bool read_hum_calibration_data(BMP280_HandleTypedef *dev) {
 			&& read_register16(dev, 0xe4, &h4)
 			&& read_register16(dev, 0xe5, &h5)
 			&& !read_data(dev, 0xe7, (uint8_t *) &dev->dig_H6, 1)) {
-		dev->dig_H4 = (h4 & 0x00ff) << 4 | (h4 & 0x0f00) >> 8;
-		dev->dig_H5 = h5 >> 4;
+		// H4 and H5 are signed 12-bit values, so keep the sign.
+		dev->dig_H4 = (int16_t) ((int8_t) (h4 & 0x00ff) * 16 + ((h4 & 0x0f00) >> 8));
+		dev->dig_H5 = (int16_t) ((int16_t) (h5 & 0xfff0) / 16);
 
 		return true;
 	}
@@ -131,7 +136,7 @@ static int write_register8(BMP280_HandleTypedef *dev, uint8_t addr, uint8_t valu
 
 	tx_buff = (dev->addr << 1);
 
-	if (HAL_I2C_Mem_Write(dev->i2c, tx_buff, addr, 1, &value, 1, 10000) == HAL_OK)
+	if (HAL_I2C_Mem_Write(dev->i2c, tx_buff, addr, 1, &value, 1, BMP280_I2C_TIMEOUT_MS) == HAL_OK)
 		return false;
 	else
 		return true;
@@ -160,11 +165,16 @@ bool bmp280_init(BMP280_HandleTypedef *dev, bmp280_params_t *params) {
 	}
 
 	// Wait until finished copying over the NVP data.
+	HAL_Delay(BMP280_STARTUP_DELAY_MS);
+	uint32_t start = HAL_GetTick();
 	while (1) {
 		uint8_t status;
 		if (!read_data(dev, BMP280_REG_STATUS, &status, 1)
 				&& (status & 1) == 0)
 			break;
+		if (HAL_GetTick() - start > BMP280_STARTUP_TIMEOUT_MS) {
+			return false;
+		}
 	}
 
 	if (!read_calibration_data(dev)) {
